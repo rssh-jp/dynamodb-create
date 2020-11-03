@@ -10,7 +10,7 @@ import (
 	"github.com/guregu/dynamo"
 )
 
-func createTable(db *dynamo.DB, tableName string, isDelete bool) error {
+func createTable(db *dynamo.DB, tableName string, info interface{}, isDelete bool) error {
 	const (
 		statusInitialize = iota + 1
 		statusDelete
@@ -46,6 +46,7 @@ func createTable(db *dynamo.DB, tableName string, isDelete bool) error {
 			} else {
 				status = statusCreate
 			}
+
 		case statusDelete:
 			log.Println("statusDelete")
 			err := db.Table(tableName).DeleteTable().Run()
@@ -53,20 +54,32 @@ func createTable(db *dynamo.DB, tableName string, isDelete bool) error {
 				return err
 			}
 
+			err = waitDeleteTable(db, tableName)
+			if err != nil {
+				return err
+			}
+
 			status = statusCreate
+
 		case statusCreate:
 			log.Println("statusCreate")
-			type UserAction struct {
-				UserID string `dynamo:"user_id,hash"`
+			err := db.CreateTable(tableName, info).Run()
+			if err != nil {
+				return err
 			}
-			err := db.CreateTable(tableName, UserAction{}).Run()
+
+			err = waitCreateTable(db, tableName)
 			if err != nil {
 				return err
 			}
 
 			status = statusFinalize
+
 		case statusFinalize:
 			log.Println("statusFinalize")
+			loop = false
+
+		default:
 			loop = false
 		}
 	}
@@ -74,7 +87,46 @@ func createTable(db *dynamo.DB, tableName string, isDelete bool) error {
 	return nil
 }
 
+func waitCreateTable(db *dynamo.DB, tableName string) error {
+	return waitExecute(func() (bool, error) {
+		desc, err := db.Table(tableName).Describe().Run()
+		if err != nil {
+			return false, err
+		}
+
+		if desc.Status == dynamo.ActiveStatus {
+			return true, nil
+		}
+
+		return false, nil
+	})
+}
+
 func waitDeleteTable(db *dynamo.DB, tableName string) error {
+	return waitExecute(func() (bool, error) {
+		tables, err := db.ListTables().All()
+		if err != nil {
+			return false, err
+		}
+
+		var isExist bool
+
+		for _, table := range tables {
+			if table == tableName {
+				isExist = true
+				break
+			}
+		}
+
+		if !isExist {
+			return true, nil
+		}
+
+		return false, nil
+	})
+}
+
+func waitExecute(funcIsEnd func() (bool, error)) error {
 	timer := time.NewTimer(time.Second * 5)
 
 loop:
@@ -84,8 +136,18 @@ loop:
 			break loop
 		}
 
-		time.Sleep(time.Second)
+		isEnd, err := funcIsEnd()
+		if err != nil {
+			return err
+		}
+
+		if isEnd {
+			break loop
+		}
+
+		time.Sleep(time.Millisecond)
 	}
+
 	return nil
 }
 
@@ -112,7 +174,7 @@ func main() {
 		UserID string `dynamo:"user_id,hash"`
 	}
 
-	err = createTable(db, "test", true)
+	err = createTable(db, "test", UserAction{}, true)
 	if err != nil {
 		log.Fatal(err)
 	}
